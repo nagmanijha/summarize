@@ -46,3 +46,10 @@ service-account.json
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# debug scripts
+debug-*.js
+model_*.json
+test.py
+models_list.txt
+all_models.json
