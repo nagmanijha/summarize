@@ -1,21 +1,19 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import Link from "next/link";
 
 // Types
-interface PageData {
-    pageNumber: number;
-    text: string;
-    confidence: number;
+type Step = "upload" | "processing" | "results";
+type Provider = "gemini" | "documentai";
+
+interface DocAiConfig {
+    projectId: string;
+    location: string;
+    processorId: string;
 }
 
-interface ProcessingResult {
-    rawText: string;
-    cleanExtract: string;
-    pages: PageData[];
-    wordCount: number;
-    confidence: number;
+interface AnalysisResult {
     summary: {
         executiveSummary: string;
         bulletPoints: string[];
@@ -27,768 +25,485 @@ interface ProcessingResult {
             amounts: string[];
         };
     };
+    confidence: number;
+    wordCount: number;
+    pages: { pageNumber: number; text: string; confidence: number }[];
+    rawText: string;
+    cleanExtract: string;
 }
 
-type AppState = "upload" | "processing" | "results";
-type ResultTab = "summary" | "clean" | "raw";
-
-interface ProcessingStep {
-    label: string;
-    description: string;
-    status: "pending" | "processing" | "completed" | "error";
-}
-
-export default function DashboardPage() {
-    const [appState, setAppState] = useState<AppState>("upload");
-    const [selectedFile, setSelectedFile] = useState<File | null>(null);
-    const [isDragging, setIsDragging] = useState(false);
+export default function Dashboard() {
+    const [step, setStep] = useState<Step>("upload");
+    const [processingStep, setProcessingStep] = useState(0); // 0: Uploading, 1: OCR, 2: Cleaning, 3: Summarizing
+    const [file, setFile] = useState<File | null>(null);
+    const [ocrProvider, setOcrProvider] = useState<Provider>("gemini");
+    const [docAiConfig, setDocAiConfig] = useState<DocAiConfig>({
+        projectId: "",
+        location: "us",
+        processorId: "",
+    });
+    const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+    const [result, setResult] = useState<AnalysisResult | null>(null);
     const [error, setError] = useState<string | null>(null);
-    const [result, setResult] = useState<ProcessingResult | null>(null);
-    const [activeTab, setActiveTab] = useState<ResultTab>("summary");
-    const [progress, setProgress] = useState(0);
-    const [steps, setSteps] = useState<ProcessingStep[]>([
-        { label: "Uploading Document", description: "Preparing file for processing", status: "pending" },
-        { label: "OCR Processing", description: "Extracting text from handwriting", status: "pending" },
-        { label: "Cleaning Text", description: "Removing noise and formatting artifacts", status: "pending" },
-        { label: "Generating Summary", description: "Creating concise bullet points via Gemini", status: "pending" },
-    ]);
-    const [showConfidence, setShowConfidence] = useState(true);
-    const [searchQuery, setSearchQuery] = useState("");
+    const [activeTab, setActiveTab] = useState<"summary" | "clean">("summary");
+
     const fileInputRef = useRef<HTMLInputElement>(null);
 
-    // File handling
-    const handleFileSelect = useCallback((file: File) => {
-        setError(null);
-        if (file.type !== "application/pdf") {
-            setError("Only PDF files are accepted");
-            return;
+    // --- Handlers ---
+
+    const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.files && e.target.files[0]) {
+            setFile(e.target.files[0]);
+            setError(null);
         }
-        if (file.size > 20 * 1024 * 1024) {
-            setError("File size exceeds 20MB limit");
-            return;
-        }
-        setSelectedFile(file);
-    }, []);
-
-    const handleDrop = useCallback(
-        (e: React.DragEvent) => {
-            e.preventDefault();
-            setIsDragging(false);
-            const file = e.dataTransfer.files[0];
-            if (file) handleFileSelect(file);
-        },
-        [handleFileSelect]
-    );
-
-    const handleDragOver = useCallback((e: React.DragEvent) => {
-        e.preventDefault();
-        setIsDragging(true);
-    }, []);
-
-    const handleDragLeave = useCallback((e: React.DragEvent) => {
-        e.preventDefault();
-        setIsDragging(false);
-    }, []);
-
-    const removeFile = () => {
-        setSelectedFile(null);
-        setError(null);
     };
 
-    const updateStep = (index: number, status: ProcessingStep["status"], description?: string) => {
-        setSteps((prev) =>
-            prev.map((s, i) =>
-                i === index ? { ...s, status, description: description || s.description } : s
-            )
-        );
+    const handleDrop = (e: React.DragEvent) => {
+        e.preventDefault();
+        if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+            if (e.dataTransfer.files[0].type === "application/pdf") {
+                setFile(e.dataTransfer.files[0]);
+                setError(null);
+            } else {
+                setError("Please upload a PDF file.");
+            }
+        }
     };
 
-    // Process document
-    const processDocument = async () => {
-        if (!selectedFile) return;
+    const startProcessing = async () => {
+        if (!file) return;
 
-        setAppState("processing");
-        setProgress(0);
-        setSteps([
-            { label: "Uploading Document", description: "Preparing file for processing", status: "pending" },
-            { label: "OCR Processing", description: "Extracting text from handwriting", status: "pending" },
-            { label: "Cleaning Text", description: "Removing noise and formatting artifacts", status: "pending" },
-            { label: "Generating Summary", description: "Creating concise bullet points via Gemini", status: "pending" },
-        ]);
+        setStep("processing");
+        setProcessingStep(0); // Uploading
+        setError(null);
 
         try {
-            // Step 1: Upload
-            updateStep(0, "processing", "Uploading file...");
-            setProgress(10);
-
+            // 1. Upload
             const formData = new FormData();
-            formData.append("file", selectedFile);
+            formData.append("file", file);
+
+            // Simulate a small delay for the "Uploading" step visual
+            await new Promise(r => setTimeout(r, 800));
 
             const uploadRes = await fetch("/api/upload", {
                 method: "POST",
                 body: formData,
             });
 
-            if (!uploadRes.ok) {
-                const err = await uploadRes.json();
-                throw new Error(err.error || "Upload failed");
-            }
-
+            if (!uploadRes.ok) throw new Error("Upload failed");
             const uploadData = await uploadRes.json();
-            updateStep(0, "completed", `File uploaded successfully (${(selectedFile.size / (1024 * 1024)).toFixed(1)} MB)`);
-            setProgress(25);
 
-            // Step 2: Process (OCR + Clean + Summarize)
-            updateStep(1, "processing", "Sending to Document AI...");
-            setProgress(35);
+            setProcessingStep(1); // OCR
 
-            const processRes = await fetch("/api/process", {
+            // 2. Process
+            const processPromise = fetch("/api/process", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ filePath: uploadData.filePath }),
+                body: JSON.stringify({
+                    filePath: uploadData.filePath,
+                    ocrProvider,
+                    docAiCreds: ocrProvider === "documentai" ? docAiConfig : undefined,
+                }),
             });
 
-            // Simulate intermediate steps for UX
-            updateStep(1, "completed", `Text extracted with ${uploadData.confidence || 95}% confidence`);
-            setProgress(55);
-            updateStep(2, "processing", "Removing noise and formatting artifacts");
-            setProgress(65);
+            // Simulate progress for generic steps if the API is fast, or just to show the user what's happening
+            const timer1 = setTimeout(() => setProcessingStep(2), 2500); // Cleaning
+            const timer2 = setTimeout(() => setProcessingStep(3), 4500); // Summarizing
+
+            const processRes = await processPromise;
+            clearTimeout(timer1);
+            clearTimeout(timer2);
 
             if (!processRes.ok) {
-                const err = await processRes.json();
-                throw new Error(err.error || "Processing failed");
+                const errData = await processRes.json();
+                throw new Error(errData.error || "Processing failed");
             }
 
-            const processData: ProcessingResult = await processRes.json();
-
-            updateStep(2, "completed", "Text cleaned and formatted");
-            setProgress(80);
-            updateStep(3, "processing", "Generating AI summary...");
-            setProgress(90);
-
-            // Small delay for UX
-            await new Promise((r) => setTimeout(r, 500));
-
-            updateStep(3, "completed", "Summary generated successfully");
-            setProgress(100);
-
-            await new Promise((r) => setTimeout(r, 300));
+            const processData = await processRes.json();
+            // Ensure we show the final step for a moment before switching
+            setProcessingStep(3);
+            await new Promise(r => setTimeout(r, 600));
 
             setResult(processData);
-            setAppState("results");
-        } catch (err) {
-            const message = err instanceof Error ? err.message : "An error occurred";
-            setError(message);
-            // Mark current processing step as error
-            setSteps((prev) =>
-                prev.map((s) => (s.status === "processing" ? { ...s, status: "error" } : s))
-            );
+            setStep("results");
+        } catch (err: any) {
+            setError(err.message);
+            setStep("upload");
         }
     };
 
-    const cancelProcessing = () => {
-        setAppState("upload");
-        setProgress(0);
-        setError(null);
+    // --- Components ---
+
+    const ConfidenceBadge = ({ confidence }: { confidence: number }) => {
+        const isHigh = confidence > 0.85;
+        const colorClass = isHigh ? "bg-emerald-100 text-emerald-800 border-emerald-200" : "bg-amber-100 text-amber-800 border-amber-200";
+        const icon = isHigh ? "verified" : "warning";
+        const label = isHigh ? "High Confidence" : "Needs Review";
+
+        return (
+            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${colorClass}`}>
+                <span className="material-icons text-[14px] mr-1">{icon}</span>
+                {label} ({confidence})
+            </span>
+        );
     };
 
-    const startNewUpload = () => {
-        setAppState("upload");
-        setSelectedFile(null);
-        setResult(null);
-        setError(null);
-        setProgress(0);
-        setActiveTab("summary");
-    };
-
-    // Download handlers
-    const downloadTxt = () => {
-        if (!result) return;
-        const content = `SCRIBEAI - Document Summary\n${"=".repeat(40)}\n\nEXECUTIVE SUMMARY\n${result.summary.executiveSummary}\n\nKEY POINTS\n${result.summary.bulletPoints.map((p, i) => `${i + 1}. ${p}`).join("\n")}\n\nKEY TOPICS\n${result.summary.keyTopics.join(", ")}\n\nCLEAN EXTRACT\n${result.cleanExtract}`;
-        const blob = new Blob([content], { type: "text/plain" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "scribeai-summary.txt";
-        a.click();
-        URL.revokeObjectURL(url);
-    };
-
-    const copyToClipboard = () => {
-        if (!result) return;
-        const content = `${result.summary.executiveSummary}\n\n${result.summary.bulletPoints.map((p, i) => `${i + 1}. ${p}`).join("\n")}`;
-        navigator.clipboard.writeText(content);
-    };
-
-    const getConfidenceLabel = (conf: number) => {
-        if (conf >= 0.9) return { label: "High", color: "text-green-600 bg-green-50 border-green-200" };
-        if (conf >= 0.7) return { label: "Medium", color: "text-yellow-600 bg-yellow-50 border-yellow-200" };
-        return { label: "Low", color: "text-red-600 bg-red-50 border-red-200" };
-    };
-
-    // Format file size
-    const formatSize = (bytes: number) => {
-        if (bytes < 1024) return `${bytes} B`;
-        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    const IntelligenceSection = ({ title, items, icon }: { title: string, items: string[], icon: string }) => {
+        if (items.length === 0) return null;
+        return (
+            <div className="mb-6 last:mb-0">
+                <div className="flex items-center gap-2 mb-2 text-gray-500 font-medium text-xs uppercase tracking-wider">
+                    <span className="material-icons text-sm">{icon}</span>
+                    {title}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                    {items.map((item, idx) => (
+                        <span key={idx} className="bg-gray-50 text-gray-700 border border-gray-200 px-2 py-1 rounded text-sm hover:bg-white hover:border-gray-300 transition-colors cursor-default">
+                            {item}
+                        </span>
+                    ))}
+                </div>
+            </div>
+        );
     };
 
     return (
-        <div className="min-h-screen bg-[#f6f6f8] font-[var(--font-inter)]">
-            {/* Top Navbar */}
-            <nav className="bg-white border-b border-gray-200 h-14 flex items-center px-6 sticky top-0 z-50">
-                <Link href="/" className="flex items-center gap-2">
-                    <div className="bg-[#4361ee]/10 p-1 rounded-lg">
-                        <span className="material-icons text-[#4361ee] text-lg">description</span>
-                    </div>
-                    <span className="font-bold text-base tracking-tight text-gray-900">ScribeAI</span>
+        <div className="flex h-screen bg-slate-900 text-gray-100 font-sans overflow-hidden font-inter selection:bg-blue-500/30">
+            {/* Slim Navigation Rail */}
+            <aside className="w-16 bg-slate-950 border-r border-slate-800 flex flex-col items-center py-6 z-20 hidden md:flex shrink-0">
+                <Link href="/" className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-lg shadow-blue-900/20 mb-8 hover:bg-blue-500 transition-colors">
+                    <span className="material-icons text-xl">auto_fix_high</span>
                 </Link>
-                {appState === "results" && result && (
-                    <div className="ml-4 flex items-center gap-2 text-sm text-gray-500">
-                        <span>›</span>
-                        <span className="text-gray-700 font-medium">{selectedFile?.name}</span>
-                        <span className="bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded-full font-medium">Processed</span>
-                    </div>
-                )}
-                <div className="ml-auto flex items-center gap-3">
-                    {appState === "results" && (
-                        <>
-                            <button onClick={copyToClipboard} className="flex items-center gap-1.5 px-3 py-1.5 border border-gray-200 rounded-lg text-sm text-gray-700 hover:bg-gray-50 transition-colors">
-                                <span className="material-icons text-base">content_copy</span> Copy All
-                            </button>
-                            <button onClick={downloadTxt} className="flex items-center gap-1.5 px-3 py-1.5 border border-gray-200 rounded-lg text-sm text-gray-700 hover:bg-gray-50 transition-colors">
-                                <span className="material-icons text-base">description</span> TXT
-                            </button>
-                            <button onClick={downloadTxt} className="flex items-center gap-1.5 px-4 py-1.5 bg-[#4361ee] text-white rounded-lg text-sm font-medium hover:bg-[#3651d4] transition-colors">
-                                <span className="material-icons text-base">download</span> Download PDF
-                            </button>
-                        </>
+
+                <nav className="flex-1 space-y-4 w-full flex flex-col items-center">
+                    <button
+                        onClick={() => { setStep('upload'); setFile(null); setResult(null); }}
+                        className={`w-10 h-10 rounded-lg flex items-center justify-center transition-all ${step === 'upload' ? 'bg-slate-800 text-blue-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}
+                        title="Upload"
+                    >
+                        <span className="material-icons">dashboard</span>
+                    </button>
+                    {step === 'results' && (
+                        <button
+                            className={`w-10 h-10 rounded-lg flex items-center justify-center transition-all bg-slate-800 text-blue-400 cursor-default`}
+                            title="Results"
+                        >
+                            <span className="material-icons">article</span>
+                        </button>
                     )}
-                    <button className="text-gray-400 hover:text-gray-600">
-                        <span className="material-icons">help_outline</span>
+                </nav>
+
+                <div className="flex flex-col gap-4 mb-6">
+                    <form action={async () => {
+                        // In a real app we'd use a server action or the signOut function from next-auth/react
+                        // For this client component we can just redirect to /api/auth/signout
+                        window.location.href = "/api/auth/signout";
+                    }}>
+                        <button
+                            className="w-10 h-10 rounded-lg flex items-center justify-center text-slate-500 hover:text-red-400 hover:bg-slate-900 transition-all"
+                            title="Sign Out"
+                        >
+                            <span className="material-icons">logout</span>
+                        </button>
+                    </form>
+
+                    <button
+                        onClick={() => setIsSettingsOpen(true)}
+                        className="w-10 h-10 rounded-lg flex items-center justify-center text-slate-500 hover:text-slate-300 hover:bg-slate-900 transition-all"
+                        title="Settings"
+                    >
+                        <span className="material-icons">settings</span>
                     </button>
                 </div>
-            </nav>
+            </aside>
 
-            {/* UPLOAD STATE */}
-            {appState === "upload" && (
-                <div className="flex items-center justify-center min-h-[calc(100vh-56px)] p-6">
-                    <div className="w-full max-w-2xl">
-                        <div className="text-center mb-8">
-                            <h1 className="text-3xl md:text-4xl font-bold text-gray-900 mb-3">Convert Handwriting to Text</h1>
-                            <p className="text-gray-500 text-lg">Upload your PDF to generate an AI summary using Gemini.</p>
+            {/* Main Content */}
+            <main className="flex-1 flex flex-col relative overflow-hidden">
+                {/* Header */}
+                <header className="h-16 bg-slate-900/80 backdrop-blur-md border-b border-slate-800 flex items-center justify-between px-6 z-10">
+                    <div className="flex items-center gap-4">
+                        <h1 className="text-lg font-semibold text-slate-200 tracking-tight">
+                            {step === 'upload' && 'New Project'}
+                            {step === 'processing' && 'Analyzing...'}
+                            {step === 'results' && (
+                                <span className="flex items-center gap-2">
+                                    <span className="text-slate-500 font-normal">Document /</span>
+                                    {file?.name}
+                                </span>
+                            )}
+                        </h1>
+                    </div>
+                </header>
+
+                <div className="flex-1 overflow-y-auto p-4 md:p-8 relative scrollbar-hide">
+
+                    {/* Error Banner */}
+                    {error && (
+                        <div className="max-w-2xl mx-auto mb-6 p-4 bg-red-950/30 border border-red-900/50 rounded-lg text-red-200 flex items-center gap-3">
+                            <span className="material-icons text-red-500">error</span>
+                            {error}
                         </div>
+                    )}
 
-                        <div className="bg-white rounded-2xl shadow-lg border border-gray-100 p-8">
-                            {/* Step indicator */}
-                            <div className="flex mb-6">
-                                <div className="flex-1 h-1 bg-[#4361ee] rounded-l-full"></div>
-                                <div className={`flex-1 h-1 ${selectedFile ? "bg-[#4361ee]" : "bg-gray-200"} rounded-r-full`}></div>
-                            </div>
+                    {/* VIEW: UPLOAD (Dark Mode) */}
+                    {step === "upload" && (
+                        <div className="max-w-2xl mx-auto flex flex-col items-center justify-center min-h-[60vh] animate-fade-in-up">
+                            <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl p-10 w-full text-center hover:border-blue-500/30 transition-colors">
+                                <div className="w-16 h-16 bg-slate-900 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-inner">
+                                    <span className="material-icons text-3xl text-blue-500">upload_file</span>
+                                </div>
+                                <h2 className="text-2xl font-bold text-white mb-2 font-display">Upload Document</h2>
+                                <p className="text-slate-400 mb-8">Drag and drop your PDF here to extract insights.</p>
 
-                            {/* Drop Zone */}
-                            <div
-                                className={`border-2 border-dashed rounded-2xl p-10 text-center transition-all duration-300 cursor-pointer ${isDragging
-                                        ? "border-[#4361ee] bg-[#4361ee]/5"
-                                        : "border-gray-300 hover:border-[#4361ee]/50"
-                                    }`}
-                                onDrop={handleDrop}
-                                onDragOver={handleDragOver}
-                                onDragLeave={handleDragLeave}
-                                onClick={() => fileInputRef.current?.click()}
-                            >
+                                <button
+                                    onClick={() => fileInputRef.current?.click()}
+                                    className="px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium transition-colors shadow-lg shadow-blue-500/20 flex items-center gap-2 mx-auto"
+                                >
+                                    <span className="material-icons text-sm">add</span>
+                                    Select File
+                                </button>
                                 <input
-                                    ref={fileInputRef}
                                     type="file"
-                                    accept=".pdf"
+                                    accept="application/pdf"
+                                    ref={fileInputRef}
+                                    onChange={handleFileSelect}
                                     className="hidden"
-                                    onChange={(e) => {
-                                        const file = e.target.files?.[0];
-                                        if (file) handleFileSelect(file);
-                                    }}
                                 />
-                                <div className="w-14 h-14 bg-[#4361ee]/10 rounded-full flex items-center justify-center mx-auto mb-4">
-                                    <span className="material-icons text-[#4361ee] text-3xl">cloud_upload</span>
-                                </div>
-                                <h3 className="text-lg font-semibold text-gray-900 mb-1">Drag & drop your handwritten PDF</h3>
-                                <p className="text-sm text-gray-500 mb-1">
-                                    or <span className="text-[#4361ee] font-medium cursor-pointer">click to browse</span>
-                                </p>
-                                <p className="text-xs text-gray-400 font-medium tracking-wider mt-2">MAX 20MB • PDF ONLY</p>
                             </div>
 
-                            {/* Error */}
-                            {error && (
-                                <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm flex items-center gap-2">
-                                    <span className="material-icons text-base">error</span>
-                                    {error}
-                                </div>
-                            )}
+                            <div
+                                onDragOver={(e) => e.preventDefault()}
+                                onDrop={handleDrop}
+                                className="absolute inset-0 z-0 pointer-events-none"
+                            />
 
-                            {/* Selected File */}
-                            {selectedFile && (
-                                <>
-                                    <div className="mt-6 border-t border-gray-100 pt-4">
-                                        <p className="text-xs text-gray-400 text-center tracking-widest mb-3">FILE SELECTED</p>
-                                        <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl border border-gray-100">
-                                            <div className="w-10 h-10 bg-red-100 rounded-lg flex items-center justify-center flex-shrink-0">
-                                                <span className="material-icons text-red-500 text-xl">picture_as_pdf</span>
-                                            </div>
-                                            <div className="flex-1 min-w-0">
-                                                <p className="font-medium text-gray-900 text-sm truncate">{selectedFile.name}</p>
-                                                <p className="text-xs text-gray-500">
-                                                    {formatSize(selectedFile.size)} • <span className="text-green-600 font-medium">Ready to process</span>
-                                                </p>
-                                            </div>
-                                            <button onClick={(e) => { e.stopPropagation(); removeFile(); }} className="text-gray-400 hover:text-gray-600">
-                                                <span className="material-icons text-xl">delete_outline</span>
-                                            </button>
+                            {file && (
+                                <div className="w-full mt-6 p-4 bg-slate-800 rounded-lg border border-slate-700 flex items-center justify-between shadow-lg animate-fade-in">
+                                    <div className="flex items-center gap-3">
+                                        <div className="w-10 h-10 bg-red-900/20 rounded-lg flex items-center justify-center text-red-400">
+                                            <span className="material-icons">picture_as_pdf</span>
+                                        </div>
+                                        <div>
+                                            <p className="font-medium text-white">{file.name}</p>
+                                            <p className="text-xs text-slate-500">Ready to process</p>
                                         </div>
                                     </div>
-
                                     <button
-                                        onClick={processDocument}
-                                        className="mt-6 w-full flex items-center justify-center gap-2 bg-[#4361ee] hover:bg-[#3651d4] text-white py-3.5 rounded-xl font-semibold transition-all shadow-lg shadow-[#4361ee]/25 hover:-translate-y-0.5"
+                                        onClick={startProcessing}
+                                        className="text-sm font-medium text-blue-400 hover:text-blue-300 transition-colors"
                                     >
-                                        <span className="material-icons text-xl">auto_awesome</span>
-                                        Process Document
+                                        Start Analysis &rarr;
                                     </button>
-                                </>
-                            )}
-
-                            <div className="mt-6 flex items-center justify-center gap-2 text-xs text-gray-400">
-                                <span className="material-icons text-sm">lock</span>
-                                Files are encrypted and auto-deleted after processing.
-                            </div>
-                        </div>
-
-                        <div className="mt-6 flex items-center justify-center gap-6 text-sm text-gray-400">
-                            <a href="#" className="hover:text-[#4361ee]">Documentation</a>
-                            <a href="#" className="hover:text-[#4361ee]">Privacy Policy</a>
-                            <a href="#" className="hover:text-[#4361ee]">Help Center</a>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* PROCESSING STATE */}
-            {appState === "processing" && (
-                <div className="flex items-center justify-center min-h-[calc(100vh-56px)] p-6">
-                    <div className="w-full max-w-xl">
-                        <div className="bg-white rounded-2xl shadow-lg border border-gray-100 p-10 text-center">
-                            {/* Animated icon */}
-                            <div className="w-20 h-20 bg-[#4361ee]/10 rounded-full flex items-center justify-center mx-auto mb-6 relative">
-                                <div className="absolute inset-0 rounded-full border-2 border-[#4361ee]/20 animate-spin-slow" style={{ borderTopColor: "#4361ee" }}></div>
-                                <span className="material-icons text-[#4361ee] text-3xl">document_scanner</span>
-                            </div>
-
-                            <h2 className="text-2xl font-bold text-gray-900 mb-2">Analyzing Document</h2>
-                            <p className="text-gray-500 text-sm mb-8">
-                                <span className="text-[#4361ee]">Processing</span> {selectedFile?.name}
-                            </p>
-
-                            {/* Steps */}
-                            <div className="space-y-4 text-left mb-8">
-                                {steps.map((step, i) => (
-                                    <div key={i} className="flex items-start gap-3">
-                                        <div className="mt-0.5 flex-shrink-0">
-                                            {step.status === "completed" && (
-                                                <div className="w-6 h-6 bg-green-100 rounded-full flex items-center justify-center">
-                                                    <span className="material-icons text-green-600 text-base">check</span>
-                                                </div>
-                                            )}
-                                            {step.status === "processing" && (
-                                                <div className="w-6 h-6 border-2 border-[#4361ee] rounded-full flex items-center justify-center animate-pulse">
-                                                    <div className="w-2 h-2 bg-[#4361ee] rounded-full"></div>
-                                                </div>
-                                            )}
-                                            {step.status === "pending" && (
-                                                <div className="w-6 h-6 border-2 border-gray-200 rounded-full"></div>
-                                            )}
-                                            {step.status === "error" && (
-                                                <div className="w-6 h-6 bg-red-100 rounded-full flex items-center justify-center">
-                                                    <span className="material-icons text-red-600 text-base">close</span>
-                                                </div>
-                                            )}
-                                        </div>
-                                        <div className="flex-1">
-                                            <div className="flex items-center justify-between">
-                                                <p className={`font-medium text-sm ${step.status === "pending" ? "text-gray-400" : step.status === "error" ? "text-red-600" : step.status === "processing" ? "text-[#4361ee]" : "text-gray-900"}`}>
-                                                    {step.label}
-                                                </p>
-                                                <span className={`text-xs font-medium ${step.status === "completed" ? "text-green-600" : step.status === "processing" ? "text-[#4361ee]" : step.status === "error" ? "text-red-600" : "text-gray-400"}`}>
-                                                    {step.status === "completed" ? "Completed" : step.status === "processing" ? "Processing..." : step.status === "error" ? "Failed" : "Pending"}
-                                                </span>
-                                            </div>
-                                            <p className={`text-xs mt-0.5 ${step.status === "pending" ? "text-gray-300" : "text-gray-500"}`}>
-                                                {step.description}
-                                            </p>
-                                            {step.status === "processing" && (
-                                                <div className="mt-2 h-1 bg-gray-100 rounded-full overflow-hidden">
-                                                    <div className="h-full bg-[#4361ee] rounded-full progress-striped transition-all duration-500" style={{ width: "60%" }}></div>
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-
-                            {/* Error message */}
-                            {error && (
-                                <div className="mb-6 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
-                                    <span className="material-icons text-base mr-1 align-middle">error</span>
-                                    {error}
                                 </div>
                             )}
-
-                            {/* Total Progress */}
-                            <div className="bg-gray-50 rounded-xl p-4 border border-gray-100">
-                                <div className="flex items-center justify-between mb-2">
-                                    <span className="text-xs font-semibold text-gray-500 tracking-wider">TOTAL PROGRESS</span>
-                                    <span className="text-lg font-bold text-[#4361ee]">{progress}%</span>
-                                </div>
-                                <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-                                    <div
-                                        className="h-full bg-[#4361ee] rounded-full transition-all duration-700 ease-out"
-                                        style={{ width: `${progress}%` }}
-                                    ></div>
-                                </div>
-                                <p className="text-xs text-gray-400 mt-2 flex items-center gap-1">
-                                    <span className="material-icons text-xs">schedule</span>
-                                    Estimated time remaining: {Math.max(0, Math.round((100 - progress) / 8))} seconds
-                                </p>
-                            </div>
-
-                            <button
-                                onClick={cancelProcessing}
-                                className="mt-6 text-gray-500 hover:text-gray-700 text-sm font-medium transition-colors"
-                            >
-                                Cancel Processing
-                            </button>
                         </div>
+                    )}
 
-                        {/* Fun fact */}
-                        <div className="mt-6 bg-white rounded-xl p-4 border border-gray-100 flex items-start gap-3">
-                            <span className="material-icons text-yellow-500 text-xl flex-shrink-0 mt-0.5">lightbulb</span>
-                            <div>
-                                <p className="text-sm font-semibold text-gray-900">Did you know?</p>
-                                <p className="text-sm text-gray-500">Our AI can recognize handwriting in over 30 languages and automatically translates mixed-language documents.</p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* RESULTS STATE */}
-            {appState === "results" && result && (
-                <div className="flex min-h-[calc(100vh-56px)]">
-                    {/* Sidebar */}
-                    <aside className="w-60 bg-white border-r border-gray-200 flex flex-col flex-shrink-0">
-                        <div className="p-4 border-b border-gray-100">
-                            <p className="text-[10px] font-semibold text-gray-400 tracking-widest mb-3">CURRENT PROJECT</p>
-                            <div className="space-y-0.5">
-                                <button
-                                    onClick={() => setActiveTab("summary")}
-                                    className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === "summary" ? "bg-[#4361ee]/10 text-[#4361ee] border-l-2 border-[#4361ee]" : "text-gray-600 hover:bg-gray-50"}`}
-                                >
-                                    <span className="material-icons text-base">auto_awesome</span>
-                                    AI Summary
-                                </button>
-                                <button
-                                    onClick={() => setActiveTab("clean")}
-                                    className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === "clean" ? "bg-[#4361ee]/10 text-[#4361ee] border-l-2 border-[#4361ee]" : "text-gray-600 hover:bg-gray-50"}`}
-                                >
-                                    <span className="material-icons text-base">article</span>
-                                    Clean Extract
-                                </button>
-                                <button
-                                    onClick={() => setActiveTab("raw")}
-                                    className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === "raw" ? "bg-[#4361ee]/10 text-[#4361ee] border-l-2 border-[#4361ee]" : "text-gray-600 hover:bg-gray-50"}`}
-                                >
-                                    <span className="material-icons text-base">data_object</span>
-                                    Raw OCR Data
-                                </button>
-                            </div>
-                        </div>
-
-                        <div className="p-4 border-b border-gray-100">
-                            <p className="text-[10px] font-semibold text-gray-400 tracking-widest mb-3">HISTORY</p>
-                            <div className="space-y-2">
-                                <div className="flex items-center gap-2 text-sm">
-                                    <span className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0"></span>
-                                    <span className="text-gray-600 truncate">{selectedFile?.name || "Document.pdf"}</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="mt-auto p-4">
-                            <button
-                                onClick={startNewUpload}
-                                className="w-full flex items-center justify-center gap-2 bg-[#4361ee] text-white py-2.5 rounded-xl text-sm font-medium hover:bg-[#3651d4] transition-colors"
-                            >
-                                <span className="material-icons text-base">add</span>
-                                Upload New
-                            </button>
-                        </div>
-                    </aside>
-
-                    {/* Main Content */}
-                    <main className="flex-1 overflow-y-auto p-6 lg:p-8">
-                        {/* AI Summary Tab */}
-                        {activeTab === "summary" && (
-                            <div className="max-w-4xl animate-fade-in">
-                                <div className="flex items-center justify-between mb-6">
-                                    <div>
-                                        <h1 className="text-2xl font-bold text-gray-900">AI Summary</h1>
-                                        <p className="text-sm text-gray-500 mt-1">
-                                            Generated • {Math.round(result.confidence * 100)}% Confidence Score
-                                        </p>
+                    {/* VIEW: PROCESSING */}
+                    {step === "processing" && (
+                        <div className="max-w-lg mx-auto flex flex-col items-center justify-center min-h-[60vh]">
+                            {/* ... kept similar but dark themed ... */}
+                            <div className="w-full bg-slate-800 rounded-2xl shadow-xl border border-slate-700 p-8 md:p-10 relative z-10">
+                                <div className="text-center mb-10">
+                                    <div className="inline-flex items-center justify-center p-3 mb-4 rounded-full bg-blue-500/10 text-blue-500 relative">
+                                        <span className="material-icons text-3xl animate-spin">smart_toy</span>
                                     </div>
+                                    <h1 className="text-2xl font-bold mb-2 text-white">Analyzing Document</h1>
+                                    <p className="text-slate-400 text-sm">Processing {file?.name}</p>
                                 </div>
 
-                                {/* Executive Summary */}
-                                <div className="bg-white rounded-xl border border-gray-200 p-6 mb-6">
-                                    <div className="flex items-center gap-2 mb-3">
-                                        <span className="material-icons text-[#4361ee] text-xl">auto_awesome</span>
-                                        <h2 className="text-lg font-bold text-gray-900">Executive Summary</h2>
-                                    </div>
-                                    <p className="text-gray-700 leading-relaxed">{result.summary.executiveSummary}</p>
-                                </div>
-
-                                <div className="grid lg:grid-cols-5 gap-6">
-                                    {/* Key Points */}
-                                    <div className="lg:col-span-3">
-                                        <h3 className="text-xs font-semibold text-gray-400 tracking-widest mb-3">KEY POINTS & ACTION ITEMS</h3>
-                                        <div className="bg-white rounded-xl border border-gray-200 p-6">
-                                            <div className="space-y-4">
-                                                {result.summary.bulletPoints.map((point, i) => (
-                                                    <div key={i} className="flex items-start gap-3">
-                                                        <span className="flex-shrink-0 w-6 h-6 bg-[#4361ee]/10 text-[#4361ee] rounded-md flex items-center justify-center text-xs font-bold mt-0.5">
-                                                            {i + 1}
-                                                        </span>
-                                                        <div>
-                                                            <p className="text-sm font-semibold text-gray-900">{point.split(".")[0]}{point.includes(".") ? "." : ""}</p>
-                                                            {point.includes(".") && point.split(".").length > 1 && (
-                                                                <p className="text-sm text-gray-500 mt-0.5">{point.split(".").slice(1).join(".").trim()}</p>
-                                                            )}
-                                                        </div>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    {/* Right column: Topics + Entities */}
-                                    <div className="lg:col-span-2 space-y-6">
-                                        {/* Key Topics */}
-                                        <div>
-                                            <h3 className="text-xs font-semibold text-gray-400 tracking-widest mb-3">IDENTIFIED TOPICS</h3>
-                                            <div className="flex flex-wrap gap-2">
-                                                {result.summary.keyTopics.map((topic, i) => (
-                                                    <span
-                                                        key={i}
-                                                        className="px-3 py-1 bg-white border border-gray-200 rounded-full text-sm font-medium text-gray-700 hover:border-[#4361ee]/50 hover:text-[#4361ee] transition-colors cursor-default"
-                                                    >
-                                                        #{topic}
+                                <div className="space-y-6 relative">
+                                    <div className="absolute left-[1.15rem] top-3 bottom-6 w-0.5 bg-slate-700 -z-10"></div>
+                                    {[
+                                        { label: "Uploading Document", icon: "cloud_upload" },
+                                        { label: "OCR Processing", icon: "document_scanner" },
+                                        { label: "Cleaning Text", icon: "cleaning_services" },
+                                        { label: "Generating Summary", icon: "summarize" }
+                                    ].map((s, i) => (
+                                        <div key={i} className={`flex items-start ${processingStep < i ? 'opacity-40' : ''}`}>
+                                            <div className="flex-shrink-0 relative">
+                                                <div className={`h-10 w-10 rounded-full flex items-center justify-center border-4 border-slate-800 shadow-sm z-10 transition-colors duration-500 ${processingStep > i ? 'bg-emerald-500 text-white' :
+                                                    processingStep === i ? 'bg-blue-600 text-white animate-pulse' : 'bg-slate-700 text-slate-400'
+                                                    }`}>
+                                                    <span className="material-icons text-lg">
+                                                        {processingStep > i ? 'check' : s.icon}
                                                     </span>
-                                                ))}
-                                            </div>
-                                        </div>
-
-                                        {/* Entities */}
-                                        <div>
-                                            <h3 className="text-xs font-semibold text-gray-400 tracking-widest mb-3">ENTITIES DETECTED</h3>
-                                            <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
-                                                {result.summary.entities.dates.length > 0 && (
-                                                    <div className="flex items-start gap-2">
-                                                        <span className="material-icons text-gray-400 text-base mt-0.5">calendar_today</span>
-                                                        <div>
-                                                            <p className="text-xs font-semibold text-gray-500">Dates</p>
-                                                            <p className="text-sm text-gray-700">{result.summary.entities.dates.join(", ")}</p>
-                                                        </div>
-                                                    </div>
-                                                )}
-                                                {result.summary.entities.amounts.length > 0 && (
-                                                    <div className="flex items-start gap-2">
-                                                        <span className="material-icons text-gray-400 text-base mt-0.5">attach_money</span>
-                                                        <div>
-                                                            <p className="text-xs font-semibold text-gray-500">Money</p>
-                                                            <p className="text-sm text-gray-700">{result.summary.entities.amounts.join(", ")}</p>
-                                                        </div>
-                                                    </div>
-                                                )}
-                                                {result.summary.entities.organizations.length > 0 && (
-                                                    <div className="flex items-start gap-2">
-                                                        <span className="material-icons text-gray-400 text-base mt-0.5">business</span>
-                                                        <div>
-                                                            <p className="text-xs font-semibold text-gray-500">Orgs</p>
-                                                            <p className="text-sm text-gray-700">{result.summary.entities.organizations.join(", ")}</p>
-                                                        </div>
-                                                    </div>
-                                                )}
-                                                {result.summary.entities.people.length > 0 && (
-                                                    <div className="flex items-start gap-2">
-                                                        <span className="material-icons text-gray-400 text-base mt-0.5">person</span>
-                                                        <div>
-                                                            <p className="text-xs font-semibold text-gray-500">People</p>
-                                                            <p className="text-sm text-gray-700">{result.summary.entities.people.join(", ")}</p>
-                                                        </div>
-                                                    </div>
-                                                )}
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-
-                        {/* Clean Extract Tab */}
-                        {activeTab === "clean" && (
-                            <div className="max-w-4xl animate-fade-in">
-                                {/* File info bar */}
-                                <div className="flex items-center gap-4 bg-white rounded-xl border border-gray-200 p-4 mb-6">
-                                    <div className="w-10 h-10 bg-red-100 rounded-lg flex items-center justify-center flex-shrink-0">
-                                        <span className="material-icons text-red-500">picture_as_pdf</span>
-                                    </div>
-                                    <div className="flex-1">
-                                        <p className="font-semibold text-gray-900 text-sm">{selectedFile?.name || "Document.pdf"}</p>
-                                        <p className="text-xs text-gray-500">{result.pages.length} Pages • {selectedFile ? formatSize(selectedFile.size) : ""} • Processed</p>
-                                    </div>
-                                    <div className="text-right">
-                                        <p className="text-2xl font-bold text-[#4361ee]">{Math.round(result.confidence * 100)}%<span className="text-xs font-normal text-gray-400 ml-1">Confidence</span></p>
-                                    </div>
-                                    <div className="text-right">
-                                        <p className="text-2xl font-bold text-gray-900">{result.wordCount.toLocaleString()}<span className="text-xs font-normal text-gray-400 ml-1">Words</span></p>
-                                    </div>
-                                </div>
-
-                                {/* Pages */}
-                                {result.pages.map((page) => {
-                                    const conf = getConfidenceLabel(page.confidence);
-                                    return (
-                                        <div key={page.pageNumber} className="mb-6">
-                                            <div className="flex items-center justify-between mb-2">
-                                                <span className="text-xs font-bold text-[#4361ee] tracking-wider">PAGE {page.pageNumber}</span>
-                                                <span className={`text-xs px-2 py-0.5 rounded border font-medium ${conf.color}`}>
-                                                    Confidence: {conf.label}
-                                                </span>
-                                            </div>
-                                            <div className="bg-white rounded-xl border border-gray-200 p-6">
-                                                <div className="prose prose-sm max-w-none text-gray-700 whitespace-pre-wrap leading-relaxed">
-                                                    {page.text}
                                                 </div>
                                             </div>
+                                            <div className="ml-4 flex-grow pt-2">
+                                                <h3 className={`text-sm font-semibold transition-colors duration-300 ${processingStep === i ? 'text-blue-400' : 'text-slate-200'}`}>{s.label}</h3>
+                                            </div>
                                         </div>
-                                    );
-                                })}
+                                    ))}
+                                </div>
                             </div>
-                        )}
+                        </div>
+                    )}
 
-                        {/* Raw OCR Tab */}
-                        {activeTab === "raw" && (
-                            <div className="max-w-4xl animate-fade-in">
-                                <div className="flex items-center justify-between mb-4">
-                                    <div>
-                                        <h1 className="text-xl font-bold text-gray-900">Processing Results</h1>
-                                        <div className="flex items-center gap-4 mt-1 text-sm">
+                    {/* VIEW: RESULTS (Paper Aesthetic) */}
+                    {step === "results" && result && (
+                        <div className="max-w-[1600px] mx-auto h-full flex flex-col lg:flex-row gap-6">
+
+                            {/* Left: Document Intelligence Panel */}
+                            <div className="w-full lg:w-80 shrink-0 space-y-6 order-2 lg:order-1">
+                                <div className="bg-white text-gray-900 rounded-xl shadow-sm border border-gray-200 p-6">
+                                    <h3 className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">Document Intelligence</h3>
+
+                                    <IntelligenceSection
+                                        title="People"
+                                        icon="person"
+                                        items={result.summary.entities.people}
+                                    />
+                                    <IntelligenceSection
+                                        title="Dates"
+                                        icon="calendar_today"
+                                        items={result.summary.entities.dates}
+                                    />
+                                    <IntelligenceSection
+                                        title="Organizations"
+                                        icon="business"
+                                        items={result.summary.entities.organizations}
+                                    />
+
+                                    <div className="mt-8 pt-6 border-t border-gray-100">
+                                        <div className="flex items-center justify-between mb-2">
+                                            <span className="text-sm font-medium text-gray-500">Confidence Score</span>
+                                            <ConfidenceBadge confidence={result.confidence} />
+                                        </div>
+                                        <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                                            <div className="h-full bg-emerald-500" style={{ width: `${result.confidence * 100}%` }}></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Right: The Paper */}
+                            <div className="flex-1 order-1 lg:order-2">
+                                <div className="bg-white text-gray-900 rounded-xl shadow-2xl shadow-black/50 overflow-hidden min-h-[800px] max-w-4xl mx-auto border border-gray-300/50 relative">
+
+                                    {/* Paper Header / Tabs */}
+                                    <div className="bg-gray-50/50 border-b border-gray-100 px-8 py-4 flex items-center justify-between sticky top-0 z-10 backdrop-blur-sm">
+                                        <div className="flex gap-6">
                                             <button
-                                                onClick={() => setActiveTab("summary")}
-                                                className="text-gray-500 hover:text-[#4361ee] font-medium"
+                                                onClick={() => setActiveTab('summary')}
+                                                className={`text-sm font-serif font-bold tracking-wide transition-colors ${activeTab === 'summary' ? 'text-gray-900' : 'text-gray-400 hover:text-gray-600'}`}
                                             >
-                                                AI Summary
+                                                Executive Summary
                                             </button>
-                                            <button className="text-[#4361ee] font-semibold border-b-2 border-[#4361ee] pb-0.5">
-                                                Raw OCR
+                                            <button
+                                                onClick={() => setActiveTab('clean')}
+                                                className={`text-sm font-serif font-bold tracking-wide transition-colors ${activeTab === 'clean' ? 'text-gray-900' : 'text-gray-400 hover:text-gray-600'}`}
+                                            >
+                                                Clean Extract
                                             </button>
                                         </div>
-                                    </div>
-                                </div>
-
-                                {/* Warning banner */}
-                                <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6 flex items-start gap-3">
-                                    <span className="material-icons text-amber-500 text-xl flex-shrink-0">warning</span>
-                                    <div>
-                                        <p className="font-semibold text-amber-700 text-sm">Low confidence segments detected</p>
-                                        <p className="text-xs text-amber-600 mt-0.5">
-                                            The AI flagged some segments with low confidence. Please review highlighted areas.
-                                        </p>
-                                    </div>
-                                    <button className="ml-auto text-amber-400 hover:text-amber-600 flex-shrink-0">
-                                        <span className="material-icons text-lg">close</span>
-                                    </button>
-                                </div>
-
-                                {/* Toolbar */}
-                                <div className="flex items-center gap-4 bg-white rounded-t-xl border border-gray-200 border-b-0 px-4 py-2.5">
-                                    <label className="flex items-center gap-2 text-sm text-gray-700">
-                                        <div
-                                            onClick={() => setShowConfidence(!showConfidence)}
-                                            className={`w-9 h-5 rounded-full cursor-pointer transition-colors ${showConfidence ? "bg-[#4361ee]" : "bg-gray-300"}`}
-                                        >
-                                            <div className={`w-4 h-4 bg-white rounded-full shadow transform transition-transform mt-0.5 ${showConfidence ? "translate-x-4.5 ml-0.5" : "translate-x-0.5"}`}></div>
+                                        <div className="flex items-center gap-2">
+                                            <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                                            <span className="text-xs font-mono text-gray-400">AI-GENERATED</span>
                                         </div>
-                                        Show confidence markers
-                                    </label>
-                                    <div className="flex items-center gap-3 text-xs text-gray-500">
-                                        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-yellow-200"></span> Caution</span>
-                                        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-red-200"></span> Critical</span>
                                     </div>
-                                    <div className="ml-auto flex items-center gap-2">
-                                        <div className="relative">
-                                            <span className="material-icons text-gray-400 text-base absolute left-2 top-1/2 -translate-y-1/2">search</span>
-                                            <input
-                                                type="text"
-                                                placeholder="Find in text..."
-                                                value={searchQuery}
-                                                onChange={(e) => setSearchQuery(e.target.value)}
-                                                className="pl-8 pr-3 py-1.5 border border-gray-200 rounded-lg text-sm w-40 focus:outline-none focus:border-[#4361ee]"
-                                            />
-                                        </div>
+
+                                    <div className="p-12 md:p-16">
+                                        {activeTab === 'summary' ? (
+                                            <div className="animate-fade-in space-y-10">
+                                                <div>
+                                                    <h1 className="font-playfair text-4xl font-bold mb-6 text-gray-900 leading-tight">
+                                                        Executive Summary
+                                                    </h1>
+                                                    <p className="font-playfair text-xl leading-relaxed text-gray-700">
+                                                        {result.summary.executiveSummary}
+                                                    </p>
+                                                </div>
+
+                                                <div className="border-t border-gray-100 pt-10">
+                                                    <h3 className="font-sans text-xs font-bold text-gray-400 uppercase tracking-widest mb-6">Key Insights</h3>
+                                                    <ul className="space-y-4">
+                                                        {result.summary.bulletPoints.map((point, i) => (
+                                                            <li key={i} className="flex gap-4 items-baseline group">
+                                                                <span className="text-blue-500 font-serif font-bold italic opacity-50 group-hover:opacity-100 transition-opacity">
+                                                                    {i + 1}.
+                                                                </span>
+                                                                <p className="font-playfair text-lg text-gray-800 leading-relaxed">
+                                                                    {point}
+                                                                </p>
+                                                            </li>
+                                                        ))}
+                                                    </ul>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div className="animate-fade-in space-y-12">
+                                                {result.pages.map((page, idx) => (
+                                                    <div key={idx} className="relative group">
+                                                        <div className="absolute -left-10 top-0 text-xs font-mono text-gray-300">
+                                                            P.{page.pageNumber || idx + 1}
+                                                        </div>
+                                                        <div className="font-playfair text-lg leading-loose text-gray-800 whitespace-pre-wrap">
+                                                            {page.text}
+                                                        </div>
+                                                        {page.confidence < 0.8 && (
+                                                            <div className="mt-4 p-3 bg-amber-50 border border-amber-100 rounded-lg flex items-center gap-2 text-amber-800 text-sm">
+                                                                <span className="material-icons text-sm">warning_amber</span>
+                                                                Low confidence detection on this page. Verify against original.
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+
+                {/* Settings Modal (Dark Mode) */}
+                {isSettingsOpen && (
+                    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex justify-end">
+                        <div className="w-full max-w-md bg-slate-900 shadow-2xl h-full p-6 flex flex-col animate-slide-in-right border-l border-slate-800">
+                            <div className="flex justify-between items-center mb-8">
+                                <h2 className="text-xl font-bold text-white">Settings</h2>
+                                <button onClick={() => setIsSettingsOpen(false)} className="text-slate-500 hover:text-slate-300">
+                                    <span className="material-icons">close</span>
+                                </button>
+                            </div>
+
+                            <div className="space-y-6 flex-1 text-slate-300">
+                                <div>
+                                    <label className="block text-sm font-medium mb-2">OCR Provider</label>
+                                    <div className="grid grid-cols-2 gap-2">
                                         <button
-                                            onClick={() => {
-                                                navigator.clipboard.writeText(result.rawText);
-                                            }}
-                                            className="text-gray-400 hover:text-gray-600"
+                                            onClick={() => setOcrProvider('gemini')}
+                                            className={`py-2 px-4 rounded-lg border text-sm font-medium transition-all ${ocrProvider === 'gemini' ? 'bg-blue-600/20 border-blue-500 text-blue-400' : 'border-slate-700 hover:bg-slate-800'}`}
                                         >
-                                            <span className="material-icons text-lg">content_copy</span>
+                                            Gemini (Free)
+                                        </button>
+                                        <button
+                                            onClick={() => setOcrProvider('documentai')}
+                                            className={`py-2 px-4 rounded-lg border text-sm font-medium transition-all ${ocrProvider === 'documentai' ? 'bg-blue-600/20 border-blue-500 text-blue-400' : 'border-slate-700 hover:bg-slate-800'}`}
+                                        >
+                                            Document AI
                                         </button>
                                     </div>
                                 </div>
-
-                                {/* JSON View */}
-                                <div className="bg-white rounded-b-xl border border-gray-200 overflow-hidden">
-                                    <div className="json-viewer p-6 overflow-x-auto max-h-[600px] overflow-y-auto bg-gray-50">
-                                        <pre className="text-sm leading-relaxed">
-                                            {JSON.stringify(
-                                                {
-                                                    document_type: "handwritten_notes",
-                                                    processed_at: new Date().toISOString(),
-                                                    total_pages: result.pages.length,
-                                                    confidence: result.confidence,
-                                                    content_blocks: result.pages.map((p) => ({
-                                                        page: p.pageNumber,
-                                                        confidence: p.confidence,
-                                                        text: p.text,
-                                                    })),
-                                                },
-                                                null,
-                                                2
-                                            )}
-                                        </pre>
-                                    </div>
-                                    <div className="border-t border-gray-100 px-4 py-2 flex items-center justify-between text-xs text-gray-400 bg-white">
-                                        <span>UTF-8 • JSON</span>
-                                        <span className="flex items-center gap-1">
-                                            <span className="w-2 h-2 rounded-full bg-green-500"></span>
-                                            Document AI Status: Processed
-                                        </span>
-                                    </div>
-                                </div>
+                                {/* ... Document AI inputs would be styled similarly ... */}
                             </div>
-                        )}
-                    </main>
-                </div>
-            )}
+
+                            <div className="pt-6 border-t border-slate-800">
+                                <button
+                                    onClick={() => setIsSettingsOpen(false)}
+                                    className="w-full py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-500"
+                                >
+                                    Done
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+            </main>
         </div>
     );
 }
