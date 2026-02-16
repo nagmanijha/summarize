@@ -6,8 +6,10 @@ import * as schema from "./db/schema"
 import Credentials from "next-auth/providers/credentials"
 import { eq } from "drizzle-orm"
 import { compare } from "bcryptjs"
+import { authConfig } from "./auth.config"
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
+    ...authConfig,
     adapter: DrizzleAdapter(db, {
         usersTable: schema.users,
         accountsTable: schema.accounts,
@@ -50,8 +52,5 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     ],
     session: {
         strategy: "jwt",
-    },
-    pages: {
-        signIn: "/login",
     },
 })

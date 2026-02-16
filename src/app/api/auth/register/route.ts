@@ -4,6 +4,7 @@ import { hash } from "bcryptjs";
 import { db } from "@/db";
 import { users } from "@/db/schema";
 import { eq } from "drizzle-orm";
+import { ZodError } from "zod";
 import * as z from "zod";
 
 // Basic validation schema
@@ -52,9 +53,9 @@ export async function POST(req: Request) {
         );
     } catch (error: any) {
         console.error("Registration Error:", error);
-        if (error instanceof z.ZodError) {
+        if (error instanceof ZodError) {
             return NextResponse.json(
-                { user: null, message: error.errors[0].message },
+                { user: null, message: (error as any).errors[0].message },
                 { status: 400 }
             );
         }

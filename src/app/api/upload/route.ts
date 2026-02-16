@@ -3,11 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 
-export const config = {
-    api: {
-        bodyParser: false,
-    },
-};
+
 
 export async function POST(request: NextRequest) {
     try {
