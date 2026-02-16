@@ -1,7 +1,11 @@
 import Link from "next/link";
 import Image from "next/image";
 
-export default function LandingPage() {
+import { auth } from "@/auth";
+
+export default async function LandingPage() {
+  const session = await auth();
+
   return (
     <div className="bg-[#f6f6f8] dark:bg-[#101322] text-gray-900 dark:text-white font-sans antialiased overflow-x-hidden min-h-screen">
       {/* Navbar */}
@@ -20,8 +24,12 @@ export default function LandingPage() {
               <a className="hover:text-blue-600 transition-colors" href="#pricing">Pricing</a>
             </div>
             <div className="flex items-center space-x-4">
-              <Link className="text-sm font-medium text-gray-600 dark:text-gray-300 hover:text-blue-600 transition-colors hidden sm:block" href="/dashboard">Log in</Link>
-              <Link className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-all shadow-lg shadow-blue-600/20" href="/dashboard">Get Started</Link>
+              {!session && (
+                <Link className="text-sm font-medium text-gray-600 dark:text-gray-300 hover:text-blue-600 transition-colors hidden sm:block" href="/dashboard">Log in</Link>
+              )}
+              <Link className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-all shadow-lg shadow-blue-600/20" href="/dashboard">
+                {session ? "Dashboard" : "Get Started"}
+              </Link>
             </div>
           </div>
         </div>
