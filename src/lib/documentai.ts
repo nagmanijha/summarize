@@ -14,15 +14,16 @@ interface DocumentAIResult {
 }
 
 export async function processDocument(
-    filePath: string
+    filePath: string,
+    creds?: { projectId?: string; location?: string; processorId?: string }
 ): Promise<DocumentAIResult> {
-    const projectId = process.env.GOOGLE_PROJECT_ID;
-    const location = process.env.GOOGLE_LOCATION || "us";
-    const processorId = process.env.DOCUMENT_AI_PROCESSOR_ID;
+    const projectId = creds?.projectId || process.env.GOOGLE_PROJECT_ID;
+    const location = creds?.location || process.env.GOOGLE_LOCATION || "us";
+    const processorId = creds?.processorId || process.env.DOCUMENT_AI_PROCESSOR_ID;
 
     if (!projectId || !processorId) {
         throw new Error(
-            "Missing GOOGLE_PROJECT_ID or DOCUMENT_AI_PROCESSOR_ID environment variables"
+            "Missing GOOGLE_PROJECT_ID or DOCUMENT_AI_PROCESSOR_ID. Please configure them in settings or .env"
         );
     }
 
