@@ -1,5 +1,3 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
-
 interface SummaryResult {
     executiveSummary: string;
     bulletPoints: string[];
@@ -13,13 +11,10 @@ interface SummaryResult {
 }
 
 export async function summarizeText(text: string): Promise<SummaryResult> {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) {
-        throw new Error("Missing GEMINI_API_KEY environment variable");
+        throw new Error("Missing OPENROUTER_API_KEY environment variable");
     }
-
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
     const prompt = `You are an expert academic assistant.
 
@@ -48,41 +43,69 @@ Text:
 ${text}
 """`;
 
-    const result = await model.generateContent(prompt);
-    const response = result.response;
-    const responseText = response.text();
-
-    // Parse JSON from response, handling potential markdown wrapping
-    let jsonStr = responseText;
-    const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (jsonMatch) {
-        jsonStr = jsonMatch[1].trim();
-    }
-
     try {
-        const parsed = JSON.parse(jsonStr);
-        return {
-            executiveSummary: parsed.executiveSummary || "",
-            bulletPoints: parsed.bulletPoints || [],
-            keyTopics: parsed.keyTopics || [],
-            entities: {
-                dates: parsed.entities?.dates || [],
-                people: parsed.entities?.people || [],
-                organizations: parsed.entities?.organizations || [],
-                amounts: parsed.entities?.amounts || [],
+        const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${apiKey}`,
+                "Content-Type": "application/json",
+                "HTTP-Referer": "http://localhost:3000",
+                "X-Title": "ScribeAI"
             },
-        };
-    } catch {
-        // If JSON parsing fails, create a basic summary
-        return {
-            executiveSummary: responseText.substring(0, 500),
-            bulletPoints: responseText
-                .split("\n")
-                .filter((l) => l.trim().startsWith("-") || l.trim().startsWith("•"))
-                .map((l) => l.replace(/^[-•]\s*/, "").trim())
-                .filter(Boolean),
-            keyTopics: [],
-            entities: { dates: [], people: [], organizations: [], amounts: [] },
-        };
+            body: JSON.stringify({
+                model: "google/gemini-2.0-flash-lite-001",
+                messages: [
+                    {
+                        role: "user",
+                        content: prompt
+                    }
+                ]
+            })
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`OpenRouter API Error ${response.status}: ${errorText}`);
+        }
+
+        const data = await response.json();
+        const responseText = data.choices[0]?.message?.content || "";
+
+        // Parse JSON from response, handling potential markdown wrapping
+        let jsonStr = responseText;
+        const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (jsonMatch) {
+            jsonStr = jsonMatch[1].trim();
+        }
+
+        try {
+            const parsed = JSON.parse(jsonStr);
+            return {
+                executiveSummary: parsed.executiveSummary || "",
+                bulletPoints: parsed.bulletPoints || [],
+                keyTopics: parsed.keyTopics || [],
+                entities: {
+                    dates: parsed.entities?.dates || [],
+                    people: parsed.entities?.people || [],
+                    organizations: parsed.entities?.organizations || [],
+                    amounts: parsed.entities?.amounts || [],
+                },
+            };
+        } catch {
+            // If JSON parsing fails, create a basic summary
+            return {
+                executiveSummary: responseText.substring(0, 500),
+                bulletPoints: responseText
+                    .split("\n")
+                    .filter((l: string) => l.trim().startsWith("-") || l.trim().startsWith("•"))
+                    .map((l: string) => l.replace(/^[-•]\s*/, "").trim())
+                    .filter(Boolean),
+                keyTopics: [],
+                entities: { dates: [], people: [], organizations: [], amounts: [] },
+            };
+        }
+    } catch (error) {
+        console.error("Gemini/OpenRouter Summarization Error:", error);
+        throw error;
     }
 }
